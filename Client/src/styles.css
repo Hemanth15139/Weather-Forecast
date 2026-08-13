@@ -1,3 +1,200 @@
-/* You can add global styles to this file, and also import other style files */
-
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap');
 @import "tailwindcss";
+
+/* Base Theme Variables */
+:root {
+  --brand-cyan: #00aae7;
+  --brand-cyan-opaque: #00aae7cc;
+
+  /* Default Dark Mode Theme */
+  --bg-page: #0b0f19;
+  --bg-glass-panel: rgba(18, 24, 38, 0.7);
+  --bg-glass-card: rgba(255, 255, 255, 0.05);
+  --bg-glass-card-hover: rgba(0, 170, 231, 0.12);
+  --bg-glass-input: rgba(15, 23, 42, 0.6);
+  --border-glass: rgba(255, 255, 255, 0.1);
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --shadow-color: rgba(0, 0, 0, 0.4);
+}
+
+/* Light Theme Overrides */
+html.light, :root.light {
+  --bg-page: #f1f5f9;
+  --bg-glass-panel: rgba(255, 255, 255, 0.85);
+  --bg-glass-card: rgba(255, 255, 255, 0.65);
+  --bg-glass-card-hover: rgba(0, 170, 231, 0.15);
+  --bg-glass-input: rgba(241, 245, 249, 0.9);
+  --border-glass: rgba(0, 0, 0, 0.08);
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --shadow-color: rgba(0, 170, 231, 0.12);
+}
+
+@layer base {
+  body {
+    font-family: 'Inter', sans-serif;
+    color: var(--text-main);
+    background-color: var(--bg-page);
+    overflow-x: hidden;
+    transition: background-color 0.4s ease, color 0.4s ease;
+  }
+
+  h1, h2, h3, h4, .font-heading {
+    font-family: 'Outfit', sans-serif;
+  }
+}
+
+/* Light & Dark Adaptive Text and Background Classes */
+html.light .text-white {
+  color: #0f172a !important;
+}
+
+html.light .text-slate-400 {
+  color: #64748b !important;
+}
+
+html.light .text-slate-300 {
+  color: #334155 !important;
+}
+
+html.light .text-slate-200 {
+  color: #1e293b !important;
+}
+
+html.light .bg-slate-900\/60,
+html.light .bg-slate-900\/40,
+html.light .bg-slate-900\/20 {
+  background-color: rgba(255, 255, 255, 0.7) !important;
+}
+
+html.light .bg-slate-800\/80,
+html.light .bg-slate-800\/40 {
+  background-color: rgba(226, 232, 240, 0.8) !important;
+}
+
+/* Custom Brand Accent Utility Classes */
+.bg-brand-accent {
+  background-color: #00aae7cc;
+}
+
+.text-brand-accent {
+  color: #00aae7;
+}
+
+.border-brand-accent {
+  border-color: #00aae7cc;
+}
+
+.glass-accent {
+  background: rgba(0, 170, 231, 0.15);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(0, 170, 231, 0.35);
+  box-shadow: 0 8px 32px 0 rgba(0, 170, 231, 0.2);
+}
+
+/* Custom Glassmorphism Utilities */
+.glass-panel {
+  background: var(--bg-glass-panel);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-glass);
+  box-shadow: 0 8px 32px 0 var(--shadow-color);
+  transition: background 0.4s ease, border-color 0.4s ease;
+}
+
+.glass-card {
+  background: var(--bg-glass-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-glass);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.glass-card:hover {
+  background: var(--bg-glass-card-hover);
+  border-color: rgba(0, 170, 231, 0.4);
+  transform: translateY(-2px);
+}
+
+.glass-input {
+  background: var(--bg-glass-input);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-glass);
+  color: var(--text-main);
+  transition: all 0.3s ease;
+}
+
+.glass-input:focus {
+  border-color: #00aae7;
+  box-shadow: 0 0 0 2px rgba(0, 170, 231, 0.3);
+  outline: none;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-glass-card);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 170, 231, 0.4);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 170, 231, 0.7);
+}
+
+/* Animations */
+@keyframes float {
+  0%, 100% { transform: translateY(0px) rotate(0deg); }
+  50% { transform: translateY(-8px) rotate(1deg); }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.05); }
+}
+
+@keyframes spinSlow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes bounceSubtle {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulseGlow 4s ease-in-out infinite;
+}
+
+.animate-spin-slow {
+  animation: spinSlow 20s linear infinite;
+}
+
+.animate-bounce-subtle {
+  animation: bounceSubtle 2s ease-in-out infinite;
+}
+
+.shimmer-text {
+  background: linear-gradient(90deg, #00aae7, #38bdf8, #818cf8, #00aae7);
+  background-size: 200% auto;
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: shimmer 4s linear infinite;
+}

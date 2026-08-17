@@ -117,7 +117,7 @@ import { WeatherLocation } from '../../models/weather.model';
           
           <!-- Left: Location Info & Temp -->
           <div class="md:col-span-7 space-y-2">
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 flex-wrap">
               <h1 class="text-3xl md:text-4xl font-extrabold text-white tracking-tight">
                 {{ data.location.name }}
               </h1>
@@ -125,12 +125,27 @@ import { WeatherLocation } from '../../models/weather.model';
                 {{ data.location.country || 'Live' }}
               </span>
             </div>
-            
-            <p class="text-xs text-slate-400 flex items-center gap-2">
-              <span>Updated {{ data.lastUpdated | date:'shortTime' }}</span>
-              <span>•</span>
-              <span class="text-emerald-400 font-medium">Live Satellite Sync</span>
-            </p>
+
+            @if (weatherService.viewingTarget(); as target) {
+              <div class="flex items-center gap-2 py-1 flex-wrap">
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse shadow-sm">
+                  🎯 Target: {{ target.label || target.date }}
+                </span>
+                <button
+                  (click)="weatherService.resetToLive()"
+                  class="px-2.5 py-1 rounded-full text-xs font-bold bg-sky-500/20 hover:bg-sky-500/40 text-sky-300 hover:text-white border border-sky-400/30 transition-all flex items-center gap-1 active:scale-95 shadow-sm"
+                  title="Return to real-time live weather"
+                >
+                  ⚡ Reset to Live
+                </button>
+              </div>
+            } @else {
+              <p class="text-xs text-slate-400 flex items-center gap-2">
+                <span>Updated {{ data.lastUpdated | date:'shortTime' }}</span>
+                <span>•</span>
+                <span class="text-emerald-400 font-medium">Live Satellite Sync</span>
+              </p>
+            }
 
             <div class="pt-4 flex items-baseline gap-4">
               <span class="text-6xl md:text-7xl font-black text-white tracking-tight drop-shadow-md">

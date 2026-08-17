@@ -10,6 +10,7 @@ import { WeatherService } from './weather.service';
 export class ChatService {
   // Backend LLM endpoint URL (can be customized or configured)
   private readonly apiUrl = 'http://localhost:8000/api/chat';
+  private sessionId: string = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString();
 
   readonly messages = signal<ChatMessage[]>([
     {
@@ -48,6 +49,7 @@ export class ChatService {
 
     const requestPayload: ChatRequest = {
       message: userMessageText,
+      session_id: this.sessionId,
       location: currentLoc.name,
       current_weather: weatherData
         ? {
@@ -65,13 +67,47 @@ export class ChatService {
         this.http.post<ChatResponse>(this.apiUrl, requestPayload)
       );
 
+      if (response.session_id) {
+        this.sessionId = response.session_id;
+      }
+
       const aiMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         sender: 'assistant',
         text: response.reply,
-        timestamp: new Date()
+        timestamp: new Date(),
+        weatherSnapshot: response.weather_snapshot ? {
+          location: response.weather_snapshot.location,
+          temp: response.weather_snapshot.temp,
+          condition: response.weather_snapshot.condition,
+          humidity: response.weather_snapshot.humidity,
+          recommendation: response.weather_snapshot.recommendation
+        } : undefined
       };
       this.messages.update((prev) => [...prev, aiMsg]);
+
+      if (response.location) {
+        if (response.target_date || response.target_time) {
+          this.weatherService.setLocationWithTarget(
+            {
+              name: response.location.name,
+              country: response.location.country || '',
+              latitude: response.location.latitude,
+              longitude: response.location.longitude
+            },
+            response.target_date,
+            response.target_time,
+            response.target_label
+          );
+        } else {
+          this.weatherService.setLocation({
+            name: response.location.name,
+            country: response.location.country || '',
+            latitude: response.location.latitude,
+            longitude: response.location.longitude
+          });
+        }
+      }
     } catch (err) {
       console.warn('Backend LLM API unreachable (http://localhost:8000/api/chat). Running AI simulator:', err);
       // Fallback simulated intelligent LLM response
@@ -82,6 +118,7 @@ export class ChatService {
   }
 
   clearChat(): void {
+    this.sessionId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString();
     this.messages.set([
       {
         id: Date.now().toString(),

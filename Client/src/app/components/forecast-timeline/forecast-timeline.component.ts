@@ -19,7 +19,9 @@ import { WeatherService } from '../../services/weather.service';
               </svg>
               Hourly Forecast
             </h3>
-            <span class="text-xs text-slate-400">Next 24 Hours</span>
+            <span class="text-xs text-sky-300 font-medium">
+              {{ weatherService.viewingTarget() ? (weatherService.viewingTarget()?.label || 'Target Window') : 'Next 24 Hours' }}
+            </span>
           </div>
 
           <!-- Horizontal Scroll Container -->
@@ -68,7 +70,9 @@ import { WeatherService } from '../../services/weather.service';
               </svg>
               7-Day Extended Forecast
             </h3>
-            <span class="text-xs text-slate-400">Weekly Outlook</span>
+            <span class="text-xs text-sky-300 font-medium">
+              {{ weatherService.viewingTarget() ? ('7 Days Starting ' + (weatherService.viewingTarget()?.label || weatherService.viewingTarget()?.date)) : 'Weekly Outlook' }}
+            </span>
           </div>
 
           <div class="space-y-2.5">

@@ -15,6 +15,7 @@ export class WeatherService {
     latitude: 51.5074,
     longitude: -0.1278
   });
+  readonly viewingTarget = signal<{ date?: string; time?: string; label?: string; isHistorical?: boolean } | null>(null);
   readonly unit = signal<'C' | 'F'>('C');
   readonly theme = signal<'dark' | 'light'>('dark');
   readonly isLoading = signal<boolean>(false);
@@ -42,7 +43,6 @@ export class WeatherService {
     }
   }
 
-
   toggleTheme(): void {
     const nextTheme = this.theme() === 'dark' ? 'light' : 'dark';
     this.theme.set(nextTheme);
@@ -60,7 +60,6 @@ export class WeatherService {
   toggleUnit(): void {
     this.unit.set(this.unit() === 'C' ? 'F' : 'C');
   }
-
 
   async searchCities(query: string): Promise<WeatherLocation[]> {
     if (!query || query.trim().length < 2) {
@@ -97,7 +96,19 @@ export class WeatherService {
   async setLocation(location: WeatherLocation): Promise<void> {
     this.selectedLocation.set(location);
     this.suggestions.set([]);
+    this.viewingTarget.set(null);
     await this.fetchWeatherForLocation(location);
+  }
+
+  async setLocationWithTarget(location: WeatherLocation, targetDate?: string, targetTime?: string, targetLabel?: string): Promise<void> {
+    this.selectedLocation.set(location);
+    this.suggestions.set([]);
+    await this.fetchWeatherForLocation(location, targetDate, targetTime, targetLabel);
+  }
+
+  async resetToLive(): Promise<void> {
+    this.viewingTarget.set(null);
+    await this.fetchWeatherForLocation(this.selectedLocation());
   }
 
   async useCurrentLocation(): Promise<void> {
@@ -114,7 +125,6 @@ export class WeatherService {
       async (position) => {
         const lat = position.coords.latitude;
         const lon = position.coords.longitude;
-        // Reverse geocode or set location
         const location: WeatherLocation = {
           name: 'My Location',
           country: 'Current Position',
@@ -131,12 +141,33 @@ export class WeatherService {
     );
   }
 
-  async fetchWeatherForLocation(loc: WeatherLocation): Promise<void> {
+  async fetchWeatherForLocation(
+    loc: WeatherLocation,
+    targetDate?: string,
+    targetTime?: string,
+    targetLabel?: string
+  ): Promise<void> {
     this.isLoading.set(true);
     this.error.set(null);
 
     try {
-      const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&hourly=temperature_2m,relative_humidity_2m,precipitation_probability,weather_code,uv_index&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max,precipitation_probability_max&timezone=auto`;
+      const todayIso = new Date().toISOString().split('T')[0];
+      const isHistorical = !!(targetDate && targetDate < todayIso);
+
+      let weatherUrl: string;
+
+      if (isHistorical && targetDate) {
+        // Calculate 7-day end date for historical query
+        const tDate = new Date(targetDate);
+        const endDateObj = new Date(tDate);
+        endDateObj.setDate(endDateObj.getDate() + 6);
+        const endIso = endDateObj.toISOString().split('T')[0];
+
+        weatherUrl = `https://archive-api.open-meteo.com/v1/archive?latitude=${loc.latitude}&longitude=${loc.longitude}&start_date=${targetDate}&end_date=${endIso}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=auto`;
+      } else {
+        // Forecast query (covering past 2 days to next 16 days)
+        weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation_probability,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m,uv_index&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max,precipitation_probability_max,precipitation_sum,wind_speed_10m_max&forecast_days=16&past_days=2&timezone=auto`;
+      }
 
       const airQualityUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${loc.latitude}&longitude=${loc.longitude}&current=us_aqi,pm10,pm2_5`;
 
@@ -145,44 +176,139 @@ export class WeatherService {
         firstValueFrom(this.http.get<any>(airQualityUrl)).catch(() => null)
       ]);
 
-      const parsedData = this.parseOpenMeteoResponse(loc, weatherRes, airRes);
+      const parsedData = this.parseOpenMeteoResponse(loc, weatherRes, airRes, targetDate, targetTime, targetLabel);
       this.weatherData.set(parsedData);
+      if (targetDate || targetTime) {
+        this.viewingTarget.set({
+          date: targetDate,
+          time: targetTime,
+          label: targetLabel || targetDate,
+          isHistorical
+        });
+      } else {
+        this.viewingTarget.set(null);
+      }
     } catch (err) {
       console.error('Failed to fetch weather from Open-Meteo, generating fallback:', err);
-      // Fallback to rich mock data if network fails
       this.weatherData.set(this.generateMockWeatherData(loc));
     } finally {
       this.isLoading.set(false);
     }
   }
 
-  private parseOpenMeteoResponse(loc: WeatherLocation, weather: any, air: any): CompleteWeatherData {
+  private parseOpenMeteoResponse(
+    loc: WeatherLocation,
+    weather: any,
+    air: any,
+    targetDate?: string,
+    targetTime?: string,
+    targetLabel?: string
+  ): CompleteWeatherData {
     const current = weather.current || {};
     const hourly = weather.hourly || {};
     const daily = weather.daily || {};
 
-    const code = current.weather_code ?? 0;
+    const dTimes: string[] = daily.time || [];
+    const hTimes: string[] = hourly.time || [];
+
+    // Find daily starting index (targetDate or today)
+    let dailyStartIdx = 0;
+    if (targetDate && dTimes.length > 0) {
+      const idx = dTimes.indexOf(targetDate);
+      if (idx !== -1) {
+        dailyStartIdx = idx;
+      }
+    } else if (dTimes.length > 0) {
+      const todayIso = new Date().toISOString().split('T')[0];
+      const idx = dTimes.indexOf(todayIso);
+      if (idx !== -1) {
+        dailyStartIdx = idx;
+      }
+    }
+
+    // Find hourly starting index (targetDate + targetTime or current hour)
+    let hourlyStartIdx = 0;
+    if (hTimes.length > 0) {
+      if (targetDate) {
+        const prefix = targetTime ? `${targetDate}T${targetTime.slice(0, 2)}` : `${targetDate}T`;
+        const idx = hTimes.findIndex((t) => t.startsWith(prefix));
+        if (idx !== -1) hourlyStartIdx = idx;
+      } else if (targetTime) {
+        const todayIso = new Date().toISOString().split('T')[0];
+        const prefix = `${todayIso}T${targetTime.slice(0, 2)}`;
+        const idx = hTimes.findIndex((t) => t.startsWith(prefix));
+        if (idx !== -1) hourlyStartIdx = idx;
+      } else {
+        const nowPrefix = new Date().toISOString().slice(0, 13);
+        const idx = hTimes.findIndex((t) => t.startsWith(nowPrefix));
+        if (idx !== -1) hourlyStartIdx = idx;
+      }
+    }
+
+    // Determine Hero Card Weather (If target is specified, use target's exact hour or day values)
+    let tempC: number;
+    let feelsLikeC: number;
+    let code: number;
+    let humidityVal: number;
+    let windSpeed: number;
+    let windDir: number;
+    let isDayVal: boolean = true;
+    let highC: number;
+    let lowC: number;
+
+    if (targetTime && hourly.temperature_2m && hourlyStartIdx < hourly.temperature_2m.length) {
+      // Specific Hour
+      tempC = hourly.temperature_2m[hourlyStartIdx] ?? 22;
+      feelsLikeC = hourly.apparent_temperature ? hourly.apparent_temperature[hourlyStartIdx] : tempC;
+      code = hourly.weather_code ? hourly.weather_code[hourlyStartIdx] : 0;
+      humidityVal = hourly.relative_humidity_2m ? hourly.relative_humidity_2m[hourlyStartIdx] : 65;
+      windSpeed = hourly.wind_speed_10m ? hourly.wind_speed_10m[hourlyStartIdx] : 12;
+      windDir = hourly.wind_direction_10m ? hourly.wind_direction_10m[hourlyStartIdx] : 180;
+      highC = daily.temperature_2m_max ? daily.temperature_2m_max[dailyStartIdx] : tempC + 3;
+      lowC = daily.temperature_2m_min ? daily.temperature_2m_min[dailyStartIdx] : tempC - 3;
+      const hrInt = parseInt(targetTime.slice(0, 2), 10);
+      isDayVal = hrInt >= 6 && hrInt < 19;
+    } else if (targetDate && daily.temperature_2m_max && dailyStartIdx < daily.temperature_2m_max.length) {
+      // Specific Date
+      highC = daily.temperature_2m_max[dailyStartIdx];
+      lowC = daily.temperature_2m_min ? daily.temperature_2m_min[dailyStartIdx] : highC - 6;
+      tempC = highC; // Display day's high / representative temp
+      code = daily.weather_code ? daily.weather_code[dailyStartIdx] : 0;
+      
+      // Find noon hour for that day to get representative humidity & wind
+      const noonIdx = hourlyStartIdx + 12 < (hourly.temperature_2m?.length || 0) ? hourlyStartIdx + 12 : hourlyStartIdx;
+      feelsLikeC = hourly.apparent_temperature ? hourly.apparent_temperature[noonIdx] : tempC;
+      humidityVal = hourly.relative_humidity_2m ? hourly.relative_humidity_2m[noonIdx] : 60;
+      windSpeed = hourly.wind_speed_10m ? hourly.wind_speed_10m[noonIdx] : 12;
+      windDir = hourly.wind_direction_10m ? hourly.wind_direction_10m[noonIdx] : 180;
+      isDayVal = true;
+    } else {
+      // Live current weather
+      tempC = current.temperature_2m ?? 22;
+      feelsLikeC = current.apparent_temperature ?? tempC;
+      code = current.weather_code ?? 0;
+      humidityVal = current.relative_humidity_2m ?? 65;
+      windSpeed = current.wind_speed_10m ?? 12;
+      windDir = current.wind_direction_10m ?? 180;
+      isDayVal = current.is_day === 1;
+      highC = daily.temperature_2m_max ? daily.temperature_2m_max[dailyStartIdx] : tempC + 4;
+      lowC = daily.temperature_2m_min ? daily.temperature_2m_min[dailyStartIdx] : tempC - 4;
+    }
+
     const conditionInfo = this.getWeatherCodeInfo(code);
-
-    const tempC = current.temperature_2m ?? 22;
     const tempF = (tempC * 9) / 5 + 32;
-    const feelsLikeC = current.apparent_temperature ?? tempC;
     const feelsLikeF = (feelsLikeC * 9) / 5 + 32;
-
-    const highC = daily.temperature_2m_max ? daily.temperature_2m_max[0] : tempC + 4;
-    const lowC = daily.temperature_2m_min ? daily.temperature_2m_min[0] : tempC - 4;
 
     const aqi = air?.current?.us_aqi ?? 35;
     const aqiLabel = this.getAqiLabel(aqi);
+    const uv = daily.uv_index_max && daily.uv_index_max[dailyStartIdx] ? daily.uv_index_max[dailyStartIdx] : 4.5;
 
-    const windSpeed = current.wind_speed_10m ?? 12;
-    const windDir = current.wind_direction_10m ?? 180;
-    const uv = daily.uv_index_max ? daily.uv_index_max[0] : 4.5;
-
-    // Hourly mapping for next 24h
-    const hourlyList = (hourly.time || []).slice(0, 24).map((t: string, idx: number) => {
-      const hTempC = hourly.temperature_2m[idx];
-      const hCode = hourly.weather_code[idx];
+    // Hourly mapping: Slice 24 hours starting from hourlyStartIdx
+    const hourlySlice = (hTimes || []).slice(hourlyStartIdx, hourlyStartIdx + 24);
+    const hourlyList = hourlySlice.map((t: string, offset: number) => {
+      const idx = hourlyStartIdx + offset;
+      const hTempC = hourly.temperature_2m ? hourly.temperature_2m[idx] : tempC;
+      const hCode = hourly.weather_code ? hourly.weather_code[idx] : code;
       const hInfo = this.getWeatherCodeInfo(hCode);
       const timeObj = new Date(t);
       const formattedTime = timeObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -197,15 +323,18 @@ export class WeatherService {
       };
     });
 
-    // Daily mapping for 7 days
+    // Daily mapping: Slice 7 days starting from dailyStartIdx (shows next 7 days from target date!)
     const daysName = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const dailyList = (daily.time || []).slice(0, 7).map((d: string, idx: number) => {
+    const dailySlice = (dTimes || []).slice(dailyStartIdx, dailyStartIdx + 7);
+    const dailyList = dailySlice.map((d: string, offset: number) => {
+      const idx = dailyStartIdx + offset;
       const dateObj = new Date(d);
-      const dayName = idx === 0 ? 'Today' : daysName[dateObj.getDay()];
+      const todayIso = new Date().toISOString().split('T')[0];
+      const dayName = d === todayIso ? 'Today' : daysName[dateObj.getDay()];
       const dCode = daily.weather_code ? daily.weather_code[idx] : 0;
       const dInfo = this.getWeatherCodeInfo(dCode);
-      const maxC = daily.temperature_2m_max[idx];
-      const minC = daily.temperature_2m_min[idx];
+      const maxC = daily.temperature_2m_max ? daily.temperature_2m_max[idx] : tempC + 2;
+      const minC = daily.temperature_2m_min ? daily.temperature_2m_min[idx] : tempC - 4;
 
       return {
         day: dayName,
@@ -239,7 +368,7 @@ export class WeatherService {
         lowC: Math.round(lowC),
         highF: Math.round((highC * 9) / 5 + 32),
         lowF: Math.round((lowC * 9) / 5 + 32),
-        humidity: current.relative_humidity_2m ?? 65,
+        humidity: Math.round(humidityVal),
         windSpeedKmH: Math.round(windSpeed),
         windDirection: windDir,
         windDirectionText: this.getCardinalDirection(windDir),
@@ -248,9 +377,9 @@ export class WeatherService {
         visibilityKm: 10,
         airQualityIndex: aqi,
         airQualityStatus: aqiLabel,
-        sunrise: formatSunTime(daily.sunrise?.[0]),
-        sunset: formatSunTime(daily.sunset?.[0]),
-        isDay: current.is_day === 1
+        sunrise: formatSunTime(daily.sunrise?.[dailyStartIdx] || daily.sunrise?.[0]),
+        sunset: formatSunTime(daily.sunset?.[dailyStartIdx] || daily.sunset?.[0]),
+        isDay: isDayVal
       },
       hourly: hourlyList,
       daily: dailyList,
@@ -261,12 +390,12 @@ export class WeatherService {
         windGusts: Math.round(windSpeed * 1.3),
         windDirectionDeg: windDir,
         windDirectionCardinal: this.getCardinalDirection(windDir),
-        humidity: current.relative_humidity_2m ?? 65,
-        dewPoint: Math.round(tempC - (100 - (current.relative_humidity_2m ?? 65)) / 5),
+        humidity: Math.round(humidityVal),
+        dewPoint: Math.round(tempC - (100 - humidityVal) / 5),
         uvIndex: Number(uv.toFixed(1)),
         uvLabel: this.getUvLabel(uv),
-        sunrise: formatSunTime(daily.sunrise?.[0]),
-        sunset: formatSunTime(daily.sunset?.[0]),
+        sunrise: formatSunTime(daily.sunrise?.[dailyStartIdx] || daily.sunrise?.[0]),
+        sunset: formatSunTime(daily.sunset?.[dailyStartIdx] || daily.sunset?.[0]),
         pressure: Math.round(current.surface_pressure ?? 1013),
         visibility: 10
       },

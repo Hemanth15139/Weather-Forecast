@@ -1,31 +1,28 @@
-import sys
 import os
+import re
+import uuid
+import logging
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
 
-# Adjust sys.path to allow importing 'app' as a package
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir in sys.path:
-    sys.path.remove(current_dir)
-parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import Optional, List
-from datetime import datetime
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from dotenv import load_dotenv
-
-dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
-load_dotenv(dotenv_path)
+from langchain_core.messages import HumanMessage
 
 from app.graph.workflow import workflow
+from app.service.weather_service import WeatherService, WEATHER_CODE_NAMES
 
-app = FastAPI(title="Weather Forecast API")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("weather_agent.api")
 
-# Add CORS Middleware to allow cross-origin requests from the frontend
+app = FastAPI(
+    title="Intelligent Weather AI Assistant API",
+    description="Production-grade LangGraph Weather Agent with Granular Tool Routing and Multi-Turn Memory",
+    version="2.0.0"
+)
+
+# Enable CORS for Angular Frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,24 +31,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class CurrentWeather(BaseModel):
-    temp: Optional[float] = None
-    condition: Optional[str] = None
-    humidity: Optional[float] = None
-    wind_speed: Optional[float] = None
-
-class ChatHistoryItem(BaseModel):
-    role: str
-    content: str
-
-import uuid
-
+# ---------------------------------------------------------
+# Pydantic Request & Response Schemas
+# ---------------------------------------------------------
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     location: Optional[str] = None
-    current_weather: Optional[CurrentWeather] = None
-    chat_history: Optional[List[ChatHistoryItem]] = None
 
 class WeatherSnapshot(BaseModel):
     location: str
@@ -62,419 +48,246 @@ class WeatherSnapshot(BaseModel):
 
 class WeatherLocation(BaseModel):
     name: str
-    country: Optional[str] = None
+    country: Optional[str] = ""
     latitude: float
     longitude: float
 
-import re
-from datetime import datetime, timedelta
+class ChatResponse(BaseModel):
+    reply: str
+    session_id: str
+    location: Optional[WeatherLocation] = None
+    weather_snapshot: Optional[WeatherSnapshot] = None
+    weather_recommendation: Optional[str] = None
+    suggestions: Optional[List[str]] = None
+    target_date: Optional[str] = None
+    target_time: Optional[str] = None
+    target_label: Optional[str] = None
 
-def parse_target_date_time(text: str, current_dt: datetime = None):
-    if not current_dt:
-        current_dt = datetime.now()
-    today = current_dt.date()
-    text_lower = text.lower()
+# ---------------------------------------------------------
+# Target Date & Time NLP Parser
+# ---------------------------------------------------------
+def parse_target_date_time(text: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extract target ISO date (YYYY-MM-DD), time (HH:MM), and user label from natural language."""
+    now = datetime.now()
+    today_date = now.date()
+    lower_text = text.lower()
     
     target_date = None
     target_time = None
     target_label = None
 
-    # Check relative days
-    if "day after tomorrow" in text_lower:
-        dt = today + timedelta(days=2)
+    # 1. Relative date keywords
+    if "day after tomorrow" in lower_text:
+        dt = today_date + timedelta(days=2)
         target_date = dt.strftime("%Y-%m-%d")
         target_label = dt.strftime("%A, %b %d, %Y")
-    elif "tomorrow" in text_lower:
-        dt = today + timedelta(days=1)
+    elif "tomorrow" in lower_text:
+        dt = today_date + timedelta(days=1)
         target_date = dt.strftime("%Y-%m-%d")
         target_label = dt.strftime("%A, %b %d, %Y")
-    elif "yesterday" in text_lower:
-        dt = today - timedelta(days=1)
+    elif "yesterday" in lower_text:
+        dt = today_date - timedelta(days=1)
         target_date = dt.strftime("%Y-%m-%d")
         target_label = dt.strftime("%A, %b %d, %Y")
-    else:
-        # Check 'in X days'
-        m_in_days = re.search(r"in\s+(\d+)\s+days?", text_lower)
-        if m_in_days:
-            days = int(m_in_days.group(1))
-            dt = today + timedelta(days=days)
+    elif "in " in lower_text and " days" in lower_text:
+        m = re.search(r'in\s+(\d+)\s+days?', lower_text)
+        if m:
+            days_count = int(m.group(1))
+            dt = today_date + timedelta(days=days_count)
             target_date = dt.strftime("%Y-%m-%d")
             target_label = dt.strftime("%A, %b %d, %Y")
-        else:
-            # Check ISO date YYYY-MM-DD
-            m_iso = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
-            if m_iso:
-                y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+
+    # 2. ISO dates (YYYY-MM-DD)
+    if not target_date:
+        iso_m = re.search(r'\b(20\d{2})-(\d{2})-(\d{2})\b', text)
+        if iso_m:
+            target_date = iso_m.group(0)
+            try:
+                dt = datetime.strptime(target_date, "%Y-%m-%d")
+                target_label = dt.strftime("%A, %b %d, %Y")
+            except Exception:
+                target_label = target_date
+
+    # 3. Explicit month/day phrases (e.g. "20th august 2026", "august 22")
+    if not target_date:
+        date_pattern = r'\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(20\d{2}))?\b'
+        m = re.search(date_pattern, lower_text)
+        if not m:
+            date_pattern_rev = r'\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+(20\d{2}))?\b'
+            m_rev = re.search(date_pattern_rev, lower_text)
+            if m_rev:
+                day = int(m_rev.group(2))
+                month_str = m_rev.group(1)[:3]
+                year = int(m_rev.group(3)) if m_rev.group(3) else now.year
                 try:
-                    dt = datetime(y, m, d).date()
+                    dt = datetime.strptime(f"{year}-{month_str}-{day}", "%Y-%b-%d")
                     target_date = dt.strftime("%Y-%m-%d")
                     target_label = dt.strftime("%A, %b %d, %Y")
                 except Exception:
                     pass
-            else:
-                months = {
-                    'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3,
-                    'april': 4, 'apr': 4, 'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
-                    'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'october': 10, 'oct': 10,
-                    'november': 11, 'nov': 11, 'december': 12, 'dec': 12
-                }
-                for m_name, m_num in sorted(months.items(), key=lambda x: -len(x[0])):
-                    pat = rf"(?:(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?)?\b{m_name}\b(?:\s+(\d{{1,2}})(?:st|nd|rd|th)?)?(?:\s+(\d{{4}}))?"
-                    m = re.search(pat, text_lower)
-                    if m:
-                        d1, d2, y_str = m.group(1), m.group(2), m.group(3)
-                        day = int(d1) if d1 else (int(d2) if d2 else None)
-                        if day:
-                            year = int(y_str) if y_str else current_dt.year
-                            try:
-                                dt = datetime(year, m_num, day).date()
-                                target_date = dt.strftime("%Y-%m-%d")
-                                target_label = dt.strftime("%A, %b %d, %Y")
-                                break
-                            except Exception:
-                                pass
-
-    # Check time: e.g. 11 pm, 11:30 am, 23:00, 5pm
-    m_time = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text_lower)
-    if m_time:
-        hr = int(m_time.group(1))
-        mn = int(m_time.group(2)) if m_time.group(2) else 0
-        ampm = m_time.group(3)
-        hr_24 = hr
-        if ampm == "pm" and hr < 12: hr_24 += 12
-        if ampm == "am" and hr == 12: hr_24 = 0
-        target_time = f"{hr_24:02d}:{mn:02d}"
-        time_label = f"{hr}:{mn:02d} {ampm.upper()}" if m_time.group(2) else f"{hr} {ampm.upper()}"
-        if not target_date:
-            target_date = today.strftime("%Y-%m-%d")
-            target_label = f"Today at {time_label}"
         else:
-            target_label = f"{target_label} at {time_label}"
+            day = int(m.group(1))
+            month_str = m.group(2)[:3]
+            year = int(m.group(3)) if m.group(3) else now.year
+            try:
+                dt = datetime.strptime(f"{year}-{month_str}-{day}", "%Y-%b-%d")
+                target_date = dt.strftime("%Y-%m-%d")
+                target_label = dt.strftime("%A, %b %d, %Y")
+            except Exception:
+                pass
+
+    # 4. Specific Hour expressions (e.g. "8 pm", "20:00", "11:30 am")
+    time_12h = re.search(r'\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b', lower_text)
+    if time_12h:
+        hr = int(time_12h.group(1))
+        minute = int(time_12h.group(2)) if time_12h.group(2) else 0
+        meridiem = time_12h.group(3)
+        if meridiem == 'pm' and hr != 12:
+            hr += 12
+        elif meridiem == 'am' and hr == 12:
+            hr = 0
+        target_time = f"{hr:02d}:{minute:02d}"
+        t_label = f"{time_12h.group(1)}{':' + f'{minute:02d}' if minute else ''} {meridiem.upper()}"
+        target_label = f"{target_label} at {t_label}" if target_label else f"Today at {t_label}"
     else:
-        m_24h = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text)
-        if m_24h:
-            target_time = f"{int(m_24h.group(1)):02d}:{int(m_24h.group(2)):02d}"
-            if not target_date:
-                target_date = today.strftime("%Y-%m-%d")
-                target_label = f"Today at {target_time}"
-            else:
-                target_label = f"{target_label} at {target_time}"
+        time_24h = re.search(r'\b([01]?\d|2[0-3]):([0-5]\d)\b', text)
+        if time_24h:
+            target_time = f"{int(time_24h.group(1)):02d}:{time_24h.group(2)}"
+            target_label = f"{target_label} at {target_time}" if target_label else f"Today at {target_time}"
 
     return target_date, target_time, target_label
 
-class ChatResponse(BaseModel):
-    reply: str
-    session_id: Optional[str] = None
-    target_date: Optional[str] = None
-    target_time: Optional[str] = None
-    target_label: Optional[str] = None
-    suggestions: Optional[List[str]] = None
-    weather_recommendation: Optional[str] = None
-    weather_snapshot: Optional[WeatherSnapshot] = None
-    location: Optional[WeatherLocation] = None
 
-@app.get("/")
-def read_root():
-    return {"status": "running", "message": "Weather Forecast API is active"}
-
-@app.get("/chat", response_class=HTMLResponse)
-@app.get("/api/chat", response_class=HTMLResponse)
-def get_chat_ui():
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Weather Agent Chat Test</title>
-        <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #121214; color: #e1e1e6; max-width: 600px; margin: 40px auto; padding: 20px; }
-            h1 { color: #61afef; text-align: center; }
-            #chat-container { background: #1e1e24; border-radius: 8px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
-            #messages { height: 300px; overflow-y: auto; border: 1px solid #2e2e38; border-radius: 4px; padding: 10px; margin-bottom: 20px; background: #151518; }
-            .message { margin-bottom: 12px; line-height: 1.4; }
-            .user { color: #98c379; }
-            .assistant { color: #61afef; }
-            #input-area { display: flex; gap: 10px; }
-            input { flex: 1; padding: 10px; border-radius: 4px; border: 1px solid #2e2e38; background: #202024; color: #fff; }
-            button { padding: 10px 20px; border: none; border-radius: 4px; background: #61afef; color: #1e1e24; font-weight: bold; cursor: pointer; }
-            button:hover { background: #529ade; }
-        </style>
-    </head>
-    <body>
-        <h1>Weather Agent Chat Test</h1>
-        <div id="chat-container">
-            <div id="messages">
-                <div class="message assistant"><b>Assistant:</b> Ask me about the weather in any city around the globe!</div>
-            </div>
-            <div id="input-area">
-                <input type="text" id="query" placeholder="What is the weather in Hyderabad?" onkeydown="if(event.key === 'Enter') sendMessage()">
-                <button onclick="sendMessage()">Send</button>
-            </div>
-        </div>
-        <script>
-            let currentSessionId = null;
-            async function sendMessage() {
-                const input = document.getElementById('query');
-                const text = input.value.trim();
-                if (!text) return;
-                
-                const messagesDiv = document.getElementById('messages');
-                messagesDiv.innerHTML += `<div class="message user"><b>You:</b> ${text}</div>`;
-                input.value = '';
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-                
-                try {
-                    const response = await fetch('/api/chat', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ message: text, session_id: currentSessionId })
-                    });
-                    const data = await response.json();
-                    if (data.session_id) currentSessionId = data.session_id;
-                    messagesDiv.innerHTML += `<div class="message assistant"><b>Assistant:</b> ${data.reply}</div>`;
-                } catch (err) {
-                    messagesDiv.innerHTML += `<div class="message assistant" style="color: #e06c75;"><b>Error:</b> Failed to connect to server.</div>`;
-                }
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-            }
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
-
-def get_condition_name(code: int) -> str:
-    if code == 0: return 'Clear Sky'
-    if 1 <= code <= 3: return 'Partly Cloudy'
-    if code in (45, 48): return 'Foggy'
-    if 51 <= code <= 67: return 'Light Rain'
-    if 71 <= code <= 77: return 'Snowfall'
-    if 80 <= code <= 82: return 'Rain Showers'
-    if code >= 95: return 'Thunderstorm'
-    return 'Overcast'
-
-def get_recommendation(condition: str, temp: float) -> str:
-    cond = condition.lower()
-    if 'rain' in cond or 'shower' in cond or 'drizzle' in cond:
-        return "It's rainy. Don't forget your umbrella!"
-    if 'storm' in cond or 'thunder' in cond:
+# ---------------------------------------------------------
+# Dynamic Weather Recommendation Generator
+# ---------------------------------------------------------
+def generate_recommendation(temp: float, condition: str, humidity: str) -> str:
+    cond_lower = condition.lower()
+    if "thunderstorm" in cond_lower:
         return "Thunderstorm active. Stay indoors if possible."
-    if temp > 30:
-        return "It's quite hot. Stay hydrated and wear light clothes."
-    if temp < 15:
-        return "It's chilly. Wear a warm jacket."
+    elif "rain" in cond_lower or "drizzle" in cond_lower or "shower" in cond_lower:
+        return "It's rainy. Don't forget your umbrella!"
+    elif "snow" in cond_lower:
+        return "Snowy conditions. Wear warm winter layers."
+    elif temp >= 33:
+        return "It's quite hot outside. Stay hydrated and use sunscreen."
+    elif temp <= 10:
+        return "Chilly weather. A warm jacket is recommended."
     return "Weather is pleasant. Enjoy your day!"
 
+
+# ---------------------------------------------------------
+# Chat Endpoint
+# ---------------------------------------------------------
 @app.post("/api/chat", response_model=ChatResponse)
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": session_id}}
 
     try:
-        # Check existing state in checkpointer
-        existing_state = workflow.get_state(config)
-        
-        # Build input messages
-        input_messages = []
-        now_str = datetime.now().strftime("%Y-%m-%d %I:%M %p")
-        default_loc = request.location or "Hyderabad"
+        inputs = {"messages": [HumanMessage(content=request.message)]}
+        result = await workflow.ainvoke(inputs, config=config)
 
-        # If new session, inject system context
-        if not existing_state or not existing_state.values:
-            system_prompt = (
-                f"You are a helpful and accurate weather assistant. "
-                f"Today's date and time is {now_str}. "
-                f"The user's active dashboard location is '{default_loc}'. "
-                f"When the user asks for the weather (including future forecasts, past/historical weather, or specific times like '11 pm', 'tomorrow', 'next Friday', 'yesterday', or past dates) "
-                f"without specifying a city, use their active location '{default_loc}'. "
-                f"You have access to two tools: "
-                f"1. `get_weather(city)`: for real-time current weather, 14-day daily forecast (past 7 days to next 14 days), and detailed hourly timeline. "
-                f"2. `get_historical_weather(city, date, end_date)`: for past/historical records on any specific date in history (e.g. YYYY-MM-DD)."
-            )
-            input_messages.append(SystemMessage(content=system_prompt))
-            if request.chat_history:
-                for item in request.chat_history:
-                    if item.role == "user":
-                        input_messages.append(HumanMessage(content=item.content))
-                    elif item.role in ("assistant", "ai"):
-                        input_messages.append(AIMessage(content=item.content))
-                    elif item.role == "system":
-                        input_messages.append(SystemMessage(content=item.content))
-        
-        # Append current user prompt
-        input_messages.append(HumanMessage(content=request.message))
-        
-        # Invoke workflow asynchronously with thread_id session tracking
-        result = await workflow.ainvoke({"messages": input_messages}, config=config)
-        
-        # Extract reply content
         last_message = result["messages"][-1]
-        reply_text = ""
-        if isinstance(last_message.content, str):
-            reply_text = last_message.content
-        elif isinstance(last_message.content, list):
-            for part in last_message.content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    reply_text += part.get("text", "")
-                elif isinstance(part, str):
-                    reply_text += part
+        if isinstance(last_message.content, list):
+            reply_text = "".join([part.get("text", str(part)) if isinstance(part, dict) else str(part) for part in last_message.content])
         else:
             reply_text = str(last_message.content)
-            
-        # Extract target date & target time if mentioned
+
+        # NLP Date/Time Parsing
         target_date, target_time, target_label = parse_target_date_time(request.message)
 
-        # Inspect if weather tools were called in the conversation turn
-        weather_snapshot = None
+        # Inspect Tool Calls for Location & Time
         location_data = None
+        weather_snapshot = None
+        ws = WeatherService()
+
         for msg in reversed(result.get("messages", [])):
             if hasattr(msg, "tool_calls") and msg.tool_calls:
                 for tc in msg.tool_calls:
-                    tool_name = tc.get("name")
-                    if tool_name in ("get_weather", "get_historical_weather"):
-                        city = tc.get("args", {}).get("city")
-                        # If tool call had specific historical date, prioritize it
-                        if tool_name == "get_historical_weather":
-                            hist_date = tc.get("args", {}).get("date")
-                            if hist_date:
-                                target_date = hist_date
-                                try:
-                                    dt_obj = datetime.strptime(hist_date, "%Y-%m-%d")
-                                    target_label = dt_obj.strftime("%A, %b %d, %Y")
-                                except Exception:
-                                    target_label = hist_date
+                    city = tc.get("args", {}).get("city")
+                    args = tc.get("args", {})
+                    if "date" in args:
+                        target_date = args["date"]
+                    elif "start_date" in args:
+                        target_date = args["start_date"]
+                    if "hour" in args:
+                        target_time = f"{int(args['hour']):02d}:00"
 
-                        if city:
-                            try:
-                                from app.service.weather_service import WeatherService
-                                ws = WeatherService()
-                                loc_coords = ws.get_coordinates(city)
-                                location_data = WeatherLocation(
-                                    name=loc_coords["name"],
-                                    country=loc_coords.get("country", ""),
-                                    latitude=loc_coords["latitude"],
-                                    longitude=loc_coords["longitude"]
-                                )
+                    if city:
+                        try:
+                            loc_coords = ws.get_coordinates(city)
+                            location_data = WeatherLocation(
+                                name=loc_coords["name"],
+                                country=loc_coords.get("country", ""),
+                                latitude=loc_coords["latitude"],
+                                longitude=loc_coords["longitude"]
+                            )
 
-                                today_str = datetime.now().strftime("%Y-%m-%d")
-                                temp_val = 22
-                                cond_name = "Partly Cloudy"
-                                humidity_val = "60%"
+                            today_str = datetime.now().strftime("%Y-%m-%d")
+                            temp_val = 22.0
+                            cond_name = "Partly Cloudy"
+                            humidity_val = "60%"
 
-                                # Case 1: Target date is in past (< today)
-                                if target_date and target_date < today_str:
-                                    hist_data = ws.get_historical_weather(city, target_date)
-                                    daily = hist_data.get("daily", {})
-                                    hourly = hist_data.get("hourly", {})
-                                    if daily.get("temperature_2m_max"):
-                                        temp_val = daily["temperature_2m_max"][0]
-                                        cond_name = get_condition_name(daily.get("weather_code", [0])[0])
-                                    if hourly.get("relative_humidity_2m"):
-                                        humidity_val = f"{hourly['relative_humidity_2m'][0]}%"
+                            # Target Date in Past
+                            if target_date and target_date < today_str:
+                                hist = ws.get_historical_weather(city, target_date)
+                                temp_val = hist.get("temp_max_c") or 22.0
+                                cond_name = hist.get("condition", "Partly Cloudy")
+                            # Target Hour Today or Future
+                            elif target_time:
+                                hr_int = int(target_time[:2])
+                                hr_date = target_date or today_str
+                                hr_data = ws.get_hourly_forecast(city, hr_date, hr_int)
+                                temp_val = hr_data.get("temperature_c") or 22.0
+                                cond_name = hr_data.get("condition", "Partly Cloudy")
+                                humidity_val = f"{hr_data.get('humidity_percent', 60)}%"
+                            # Target Date Today or Future
+                            elif target_date:
+                                d_data = ws.get_daily_forecast(city, target_date)
+                                temp_val = d_data.get("temp_max_c") or 22.0
+                                cond_name = d_data.get("condition", "Partly Cloudy")
+                            # Live Current Weather
+                            else:
+                                curr = ws.get_current_weather(city)
+                                temp_val = curr.get("temperature_c") or 22.0
+                                cond_name = curr.get("condition", "Partly Cloudy")
+                                humidity_val = f"{curr.get('humidity_percent', 60)}%"
 
-                                # Case 2: Target date is today or in future
-                                elif target_date or target_time:
-                                    weather = ws.get_weather(city)
-                                    daily = weather.get("daily", {})
-                                    hourly = weather.get("hourly", {})
-                                    
-                                    # If specific time requested today or target date
-                                    if target_time:
-                                        t_times = hourly.get("time", [])
-                                        t_temps = hourly.get("temperature_2m", [])
-                                        t_codes = hourly.get("weather_code", [])
-                                        t_humids = hourly.get("relative_humidity_2m", [])
-                                        search_prefix = f"{target_date}T{target_time[:2]}" if target_date else f"T{target_time[:2]}"
-                                        matched_idx = None
-                                        for idx, t_str in enumerate(t_times):
-                                            if target_date:
-                                                if t_str.startswith(f"{target_date}T{target_time[:2]}"):
-                                                    matched_idx = idx
-                                                    break
-                                            else:
-                                                if f"T{target_time[:2]}" in t_str:
-                                                    matched_idx = idx
-                                                    break
-                                        if matched_idx is not None and matched_idx < len(t_temps):
-                                            temp_val = t_temps[matched_idx]
-                                            cond_name = get_condition_name(t_codes[matched_idx])
-                                            humidity_val = f"{t_humids[matched_idx]}%"
-                                    elif target_date:
-                                        d_times = daily.get("time", [])
-                                        if target_date in d_times:
-                                            d_idx = d_times.index(target_date)
-                                            temp_val = daily.get("temperature_2m_max", [22])[d_idx]
-                                            cond_name = get_condition_name(daily.get("weather_code", [0])[d_idx])
-                                        else:
-                                            curr = weather.get("current", {})
-                                            temp_val = curr.get("temperature_2m", 22)
-                                            cond_name = get_condition_name(curr.get("weather_code", 0))
-                                else:
-                                    # Regular current weather
-                                    weather = ws.get_weather(city)
-                                    curr = weather.get("current", {})
-                                    temp_val = curr.get("temperature_2m", 22)
-                                    cond_name = get_condition_name(curr.get("weather_code", 0))
-                                    humidity_val = f"{curr.get('relative_humidity_2m', 60)}%"
-
-                                temp_str = f"{int(round(temp_val))}°C"
-                                weather_snapshot = WeatherSnapshot(
-                                    location=f"{loc_coords['name']}, {loc_coords.get('country', '')}",
-                                    temp=temp_str,
-                                    condition=cond_name,
-                                    humidity=humidity_val,
-                                    recommendation=get_recommendation(cond_name, temp_val)
-                                )
-                            except Exception as ex:
-                                print(f"Error extracting weather snapshot: {ex}", flush=True)
-                        break
+                            recom = generate_recommendation(temp_val, cond_name, humidity_val)
+                            loc_display = f"{loc_coords['name']}, {loc_coords.get('country', '')}".strip(", ")
+                            weather_snapshot = WeatherSnapshot(
+                                location=loc_display,
+                                temp=f"{round(temp_val)}°C",
+                                condition=cond_name,
+                                humidity=humidity_val,
+                                recommendation=recom
+                            )
+                            break
+                        except Exception as e:
+                            logger.warning(f"Failed to generate snapshot for {city}: {e}")
+                if location_data:
+                    break
 
         return ChatResponse(
             reply=reply_text,
             session_id=session_id,
+            location=location_data,
+            weather_snapshot=weather_snapshot,
+            weather_recommendation=weather_snapshot.recommendation if weather_snapshot else None,
+            suggestions=["What's the forecast for tomorrow?", "Will it rain at 8 PM?", "Weather in Paris on 2025-07-14?"],
             target_date=target_date,
             target_time=target_time,
-            target_label=target_label,
-            weather_snapshot=weather_snapshot,
-            location=location_data
-        )
-    except Exception as e:
-        print(f"Error handling chat request: {e}", flush=True)
-        # If location was provided in request, attempt direct fallback weather lookup
-        if request.location:
-            try:
-                from app.service.weather_service import WeatherService
-                weather = WeatherService().get_weather(request.location)
-                loc = weather["location"]
-                curr = weather["current"]
-                temp_v = curr.get("temperature_2m", 22)
-                cond_n = get_condition_name(curr.get("weather_code", 0))
-                return ChatResponse(
-                    reply=f"Here is the current weather for **{loc['name']}, {loc.get('country', '')}**: Currently **{int(round(temp_v))}°C** with **{cond_n}**, humidity at {curr.get('relative_humidity_2m', 60)}%.",
-                    session_id=session_id,
-                    weather_snapshot=WeatherSnapshot(
-                        location=f"{loc['name']}, {loc.get('country', '')}",
-                        temp=f"{int(round(temp_v))}°C",
-                        condition=cond_n,
-                        humidity=f"{curr.get('relative_humidity_2m', 60)}%",
-                        recommendation=get_recommendation(cond_n, temp_v)
-                    ),
-                    location=WeatherLocation(
-                        name=loc["name"],
-                        country=loc.get("country", ""),
-                        latitude=loc["latitude"],
-                        longitude=loc["longitude"]
-                    )
-                )
-            except Exception:
-                pass
-        return ChatResponse(
-            reply="I'm having trouble connecting to the AI services right now. Please try asking again in a moment.",
-            session_id=session_id,
-            weather_snapshot=None,
-            location=None
+            target_label=target_label
         )
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+    except Exception as e:
+        logger.error(f"Chat processing error: {e}", exc_info=True)
+        return ChatResponse(
+            reply="I'm having trouble retrieving weather data right now. Please try again in a moment.",
+            session_id=session_id
+        )
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "architecture": "LangGraph Granular Weather Agent"}

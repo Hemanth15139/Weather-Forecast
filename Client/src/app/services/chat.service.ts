@@ -86,27 +86,22 @@ export class ChatService {
       };
       this.messages.update((prev) => [...prev, aiMsg]);
 
-      if (response.location) {
-        if (response.target_date || response.target_time) {
-          this.weatherService.setLocationWithTarget(
-            {
-              name: response.location.name,
-              country: response.location.country || '',
-              latitude: response.location.latitude,
-              longitude: response.location.longitude
-            },
-            response.target_date,
-            response.target_time,
-            response.target_label
-          );
-        } else {
-          this.weatherService.setLocation({
-            name: response.location.name,
-            country: response.location.country || '',
-            latitude: response.location.latitude,
-            longitude: response.location.longitude
-          });
-        }
+      const targetLoc = response.location ? {
+        name: response.location.name,
+        country: response.location.country || '',
+        latitude: response.location.latitude,
+        longitude: response.location.longitude
+      } : this.weatherService.selectedLocation();
+
+      if (response.target_date || response.target_time) {
+        this.weatherService.setLocationWithTarget(
+          targetLoc,
+          response.target_date,
+          response.target_time,
+          response.target_label
+        );
+      } else if (response.location) {
+        this.weatherService.setLocation(targetLoc);
       }
     } catch (err) {
       console.warn('Backend LLM API unreachable (http://localhost:8000/api/chat). Running AI simulator:', err);

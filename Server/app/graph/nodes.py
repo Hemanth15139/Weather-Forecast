@@ -4,12 +4,18 @@ from app.graph.state import WeatherState
 from app.llm import llm_tools
 
 async def llm_node(state: WeatherState):
+    """
+    LLM reasoning node:
+    1. Injects dynamic real-world date and 16-day forecast horizon into SystemMessage.
+    2. Passes conversation history to the model.
+    3. Model selects the specific granular weather tool or generates the final response.
+    """
     messages = list(state.get('messages', []))
     
-    # Dynamically compute real-world time and forecast boundaries
+    # Compute real-world dynamic time anchors
     now_dt = datetime.now()
     today_date = now_dt.date()
-    forecast_end_date = today_date + timedelta(days=14)
+    forecast_end_date = today_date + timedelta(days=16)
     
     now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
     today_str = today_date.strftime("%Y-%m-%d")
@@ -17,41 +23,37 @@ async def llm_node(state: WeatherState):
 
     system_text = (
         f"You are a helpful, knowledgeable, and accurate AI Weather Assistant.\n\n"
-        f"TIME & HORIZON CONTEXT:\n"
+        f"REAL-WORLD TEMPORAL CONTEXT:\n"
         f"- Current Real-World Date & Time: {now_str} (ISO: {today_str})\n"
-        f"- Active 14-Day Forecast Window: {today_str} through {forecast_end_str}\n\n"
-        f"AVAILABLE TOOLS:\n"
-        f"1. `get_weather(city)`:\n"
-        f"   - Retrieves real-time current conditions, hourly timeline (for today and upcoming days), and a 14-day daily forecast (covering {today_str} to {forecast_end_str}).\n"
-        f"   - Use for: current weather, specific hours today/tomorrow/this week (e.g. 'at 11 pm', 'tonight', 'tomorrow morning'), and any upcoming date within the 14-day window.\n"
-        f"2. `get_historical_weather(city, date, end_date=None)`:\n"
-        f"   - Retrieves past weather records for any date prior to {today_str} (format: YYYY-MM-DD).\n"
-        f"   - Use for: past dates (e.g. 'yesterday', 'last month', 'July 4 2024', any past year/day).\n\n"
+        f"- Active 16-Day Forecast Horizon: {today_str} through {forecast_end_str}\n\n"
+        f"GRANULAR TOOLS & SPECIFIC USAGE:\n"
+        f"1. `get_current_weather(city)`: For live current conditions right now.\n"
+        f"2. `get_weather_forecast(city, date)`: For a single upcoming date within the next 16 days (e.g. 'tomorrow', 'August 22').\n"
+        f"3. `get_hourly_forecast(city, date, hour)`: For weather at an exact hour (e.g. 'tomorrow at 8 PM' -> hour=20, 'tonight at 11 PM' -> hour=23).\n"
+        f"4. `get_weather_forecast_range(city, start_date, end_date)`: For multi-day forecast ranges (e.g. 'August 20 to August 25').\n"
+        f"5. `get_historical_weather(city, date)`: For a single past date before {today_str} (e.g. 'yesterday', 'July 14, 2025').\n"
+        f"6. `get_historical_weather_range(city, start_date, end_date)`: For past date ranges (e.g. 'between August 1 and August 5').\n\n"
         f"RULES & BEHAVIOR:\n"
-        f"- ALWAYS call the appropriate weather tool before answering. Never invent weather data.\n"
-        f"- If the requested date falls between {today_str} and {forecast_end_str}, call `get_weather(city)` and extract the forecast for that specific day or hour.\n"
-        f"- If the requested date is before {today_str}, call `get_historical_weather(city, date)`.\n"
-        f"- If the user specifies a time or date without naming a city, maintain the active location from the conversation context.\n"
-        f"- Provide a clear, natural, and helpful response with temperature, feels-like, sky condition, and precipitation/rain chance."
+        f"- ALWAYS call the most specific tool for the user's intent. Never invent weather data.\n"
+        f"- Convert relative terms ('today', 'tomorrow', 'yesterday', 'next Friday') into exact YYYY-MM-DD dates using the temporal context.\n"
+        f"- Retain the active city location across conversational turns when the user asks follow-up questions without naming the city.\n"
+        f"- If a user asks for a date beyond the 16-day forecast horizon (> {forecast_end_str}), the tool will inform you of the boundary to explain to the user.\n"
+        f"- Provide a clear, natural, and helpful response."
     )
     
+    # Ensure system prompt is always refreshed at the start of messages
     if not messages or not isinstance(messages[0], SystemMessage):
         messages = [SystemMessage(content=system_text)] + messages
     else:
         messages[0] = SystemMessage(content=system_text)
 
     response = await llm_tools.ainvoke(messages)
-
-    return {
-        "messages": [response]
-    }
+    return {"messages": [response]}
 
 
-def should_continue(state: WeatherState):
-
+def should_continue(state: WeatherState) -> str:
+    """Evaluate whether the LLM produced tool_calls or finished generating the final reply."""
     last_message = state["messages"][-1]
-
-    if last_message.tool_calls:
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"
-
     return "end"

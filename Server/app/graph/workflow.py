@@ -1,47 +1,29 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 from app.graph.state import WeatherState
 from app.graph.nodes import llm_node, should_continue
-from app.tools import get_weather, get_historical_weather
+from app.llm import ALL_TOOLS
 
-builder= StateGraph(WeatherState)
+# Initialize State Graph
+builder = StateGraph(WeatherState)
 
-builder.add_node(
-    'llm',
-    llm_node
-)
+# Add Nodes
+builder.add_node("llm", llm_node)
+builder.add_node("tools", ToolNode(ALL_TOOLS))
 
-builder.add_node(
-    'tools',
-    ToolNode([get_weather, get_historical_weather])
-)
-
-builder.add_edge(
-    START,
-    'llm'
-)
-
-
+# Connect Edges
+builder.add_edge(START, "llm")
 builder.add_conditional_edges(
-    'llm',
+    "llm",
     should_continue,
     {
-        "tools":"tools",
-        "end":END
-    },
+        "tools": "tools",
+        "end": END
+    }
 )
+builder.add_edge("tools", "llm")
 
-# builder.add_edge(
-#     'llm',
-#     END
-# )
-
-builder.add_edge(
-    'tools',
-    'llm'
-)
-
-from langgraph.checkpoint.memory import MemorySaver
-
+# In-memory checkpointer preserves conversation threads per thread_id (session_id)
 checkpointer = MemorySaver()
 workflow = builder.compile(checkpointer=checkpointer)

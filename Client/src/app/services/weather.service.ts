@@ -151,22 +151,38 @@ export class WeatherService {
     this.error.set(null);
 
     try {
-      const todayIso = new Date().toISOString().split('T')[0];
+      const todayObj = new Date();
+      const todayIso = todayObj.toISOString().split('T')[0];
+      
+      const sevenDaysAgoObj = new Date();
+      sevenDaysAgoObj.setDate(sevenDaysAgoObj.getDate() - 7);
+      const sevenDaysAgoIso = sevenDaysAgoObj.toISOString().split('T')[0];
+
       const isHistorical = !!(targetDate && targetDate < todayIso);
+      const isRecentPast = !!(targetDate && targetDate < todayIso && targetDate >= sevenDaysAgoIso);
+      const isDeepHistorical = !!(targetDate && targetDate < sevenDaysAgoIso);
 
       let weatherUrl: string;
 
-      if (isHistorical && targetDate) {
-        // Calculate 7-day end date for historical query
-        const tDate = new Date(targetDate);
+      if (isDeepHistorical && targetDate) {
+        // Deep historical: Archive API capped at yesterday
+        const tDate = new Date(targetDate + 'T12:00:00');
         const endDateObj = new Date(tDate);
         endDateObj.setDate(endDateObj.getDate() + 6);
-        const endIso = endDateObj.toISOString().split('T')[0];
+        
+        const yesterdayObj = new Date();
+        yesterdayObj.setDate(yesterdayObj.getDate() - 1);
+        const yesterdayIso = yesterdayObj.toISOString().split('T')[0];
+
+        let endIso = endDateObj.toISOString().split('T')[0];
+        if (endIso > yesterdayIso) {
+          endIso = yesterdayIso;
+        }
 
         weatherUrl = `https://archive-api.open-meteo.com/v1/archive?latitude=${loc.latitude}&longitude=${loc.longitude}&start_date=${targetDate}&end_date=${endIso}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=auto`;
       } else {
-        // Forecast query (covering past 2 days to next 16 days)
-        weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation_probability,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m,uv_index&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max,precipitation_probability_max,precipitation_sum,wind_speed_10m_max&forecast_days=16&past_days=2&timezone=auto`;
+        // Forecast query with past_days=7 (covers recent history like yesterday, plus 16 future days seamlessly)
+        weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation_probability,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m,uv_index&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max,precipitation_probability_max,precipitation_sum,wind_speed_10m_max&forecast_days=16&past_days=7&timezone=auto`;
       }
 
       const airQualityUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${loc.latitude}&longitude=${loc.longitude}&current=us_aqi,pm10,pm2_5`;
@@ -328,7 +344,7 @@ export class WeatherService {
     const dailySlice = (dTimes || []).slice(dailyStartIdx, dailyStartIdx + 7);
     const dailyList = dailySlice.map((d: string, offset: number) => {
       const idx = dailyStartIdx + offset;
-      const dateObj = new Date(d);
+      const dateObj = new Date(d + 'T12:00:00');
       const todayIso = new Date().toISOString().split('T')[0];
       const dayName = d === todayIso ? 'Today' : daysName[dateObj.getDay()];
       const dCode = daily.weather_code ? daily.weather_code[idx] : 0;

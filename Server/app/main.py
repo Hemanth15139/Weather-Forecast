@@ -8,17 +8,16 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from langchain_core.messages import HumanMessage
 
-from app.graph.workflow import workflow
+from app.adk_runner import ask_adk_agent
 from app.service.weather_service import WeatherService, WEATHER_CODE_NAMES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("weather_agent.api")
 
 app = FastAPI(
-    title="Intelligent Weather AI Assistant API",
-    description="Production-grade LangGraph Weather Agent with Granular Tool Routing and Multi-Turn Memory",
+    title="Intelligent Weather AI Assistant API (Google ADK)",
+    description="Production-grade Google ADK Weather Agent with Granular Tool Routing and Multi-Turn Memory",
     version="2.0.0"
 )
 
@@ -177,22 +176,17 @@ def generate_recommendation(temp: float, condition: str, humidity: str) -> str:
 
 
 # ---------------------------------------------------------
-# Chat Endpoint
+# Chat Endpoint (Powered by Google ADK)
 # ---------------------------------------------------------
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": session_id}}
 
     try:
-        inputs = {"messages": [HumanMessage(content=request.message)]}
-        result = await workflow.ainvoke(inputs, config=config)
-
-        last_message = result["messages"][-1]
-        if isinstance(last_message.content, list):
-            reply_text = "".join([part.get("text", str(part)) if isinstance(part, dict) else str(part) for part in last_message.content])
-        else:
-            reply_text = str(last_message.content)
+        # Execute through Google ADK Runner
+        adk_result = await ask_adk_agent(request.message, session_id=session_id)
+        reply_text = adk_result["reply"]
+        executed_tool_calls = adk_result["tool_calls"]
 
         # NLP Date/Time Parsing
         target_date, target_time, target_label = parse_target_date_time(request.message)
@@ -202,72 +196,70 @@ async def chat_endpoint(request: ChatRequest):
         weather_snapshot = None
         ws = WeatherService()
 
-        for msg in reversed(result.get("messages", [])):
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    city = tc.get("args", {}).get("city")
-                    args = tc.get("args", {})
-                    if "date" in args:
-                        target_date = args["date"]
-                    elif "start_date" in args:
-                        target_date = args["start_date"]
-                    if "hour" in args:
-                        target_time = f"{int(args['hour']):02d}:00"
+        for tc in reversed(executed_tool_calls):
+            city = tc.get("args", {}).get("city")
+            args = tc.get("args", {})
+            if "date" in args:
+                target_date = args["date"]
+            elif "start_date" in args:
+                target_date = args["start_date"]
+            if "hour" in args:
+                target_time = f"{int(args['hour']):02d}:00"
 
-                    if city:
-                        try:
-                            loc_coords = ws.get_coordinates(city)
-                            location_data = WeatherLocation(
-                                name=loc_coords["name"],
-                                country=loc_coords.get("country", ""),
-                                latitude=loc_coords["latitude"],
-                                longitude=loc_coords["longitude"]
-                            )
+            if city:
+                try:
+                    loc_coords = ws.get_coordinates(city)
+                    location_data = WeatherLocation(
+                        name=loc_coords["name"],
+                        country=loc_coords.get("country", ""),
+                        latitude=loc_coords["latitude"],
+                        longitude=loc_coords["longitude"]
+                    )
 
-                            today_str = datetime.now().strftime("%Y-%m-%d")
-                            temp_val = 22.0
-                            cond_name = "Partly Cloudy"
-                            humidity_val = "60%"
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+                    temp_val = 22.0
+                    cond_name = "Partly Cloudy"
+                    humidity_val = "60%"
 
-                            # Target Date in Past
-                            if target_date and target_date < today_str:
-                                hist = ws.get_historical_weather(city, target_date)
-                                temp_val = hist.get("temp_max_c") or 22.0
-                                cond_name = hist.get("condition", "Partly Cloudy")
-                            # Target Hour Today or Future
-                            elif target_time:
-                                hr_int = int(target_time[:2])
-                                hr_date = target_date or today_str
-                                hr_data = ws.get_hourly_forecast(city, hr_date, hr_int)
-                                temp_val = hr_data.get("temperature_c") or 22.0
-                                cond_name = hr_data.get("condition", "Partly Cloudy")
-                                humidity_val = f"{hr_data.get('humidity_percent', 60)}%"
-                            # Target Date Today or Future
-                            elif target_date:
-                                d_data = ws.get_daily_forecast(city, target_date)
-                                temp_val = d_data.get("temp_max_c") or 22.0
-                                cond_name = d_data.get("condition", "Partly Cloudy")
-                            # Live Current Weather
-                            else:
-                                curr = ws.get_current_weather(city)
-                                temp_val = curr.get("temperature_c") or 22.0
-                                cond_name = curr.get("condition", "Partly Cloudy")
-                                humidity_val = f"{curr.get('humidity_percent', 60)}%"
+                    # Target Date in Past
+                    if target_date and target_date < today_str:
+                        hist = ws.get_historical_weather(city, target_date)
+                        temp_val = hist.get("temp_max_c") or 22.0
+                        cond_name = hist.get("condition", "Partly Cloudy")
+                    # Target Hour Today or Future
+                    elif target_time:
+                        hr_int = int(target_time[:2])
+                        hr_date = target_date or today_str
+                        hr_data = ws.get_hourly_forecast(city, hr_date, hr_int)
+                        temp_val = hr_data.get("temperature_c") or 22.0
+                        cond_name = hr_data.get("condition", "Partly Cloudy")
+                        humidity_val = f"{hr_data.get('humidity_percent', 60)}%"
+                    # Target Date Today or Future
+                    elif target_date:
+                        d_data = ws.get_daily_forecast(city, target_date)
+                        temp_val = d_data.get("temp_max_c") or 22.0
+                        cond_name = d_data.get("condition", "Partly Cloudy")
+                    # Live Current Weather
+                    else:
+                        curr = ws.get_current_weather(city)
+                        temp_val = curr.get("temperature_c") or 22.0
+                        cond_name = curr.get("condition", "Partly Cloudy")
+                        humidity_val = f"{curr.get('humidity_percent', 60)}%"
 
-                            recom = generate_recommendation(temp_val, cond_name, humidity_val)
-                            loc_display = f"{loc_coords['name']}, {loc_coords.get('country', '')}".strip(", ")
-                            weather_snapshot = WeatherSnapshot(
-                                location=loc_display,
-                                temp=f"{round(temp_val)}°C",
-                                condition=cond_name,
-                                humidity=humidity_val,
-                                recommendation=recom
-                            )
-                            break
-                        except Exception as e:
-                            logger.warning(f"Failed to generate snapshot for {city}: {e}")
-                if location_data:
+                    recom = generate_recommendation(temp_val, cond_name, humidity_val)
+                    loc_display = f"{loc_coords['name']}, {loc_coords.get('country', '')}".strip(", ")
+                    weather_snapshot = WeatherSnapshot(
+                        location=loc_display,
+                        temp=f"{round(temp_val)}°C",
+                        condition=cond_name,
+                        humidity=humidity_val,
+                        recommendation=recom
+                    )
                     break
+                except Exception as e:
+                    logger.warning(f"Failed to generate snapshot for {city}: {e}")
+            if location_data:
+                break
 
         return ChatResponse(
             reply=reply_text,
@@ -282,7 +274,7 @@ async def chat_endpoint(request: ChatRequest):
         )
 
     except Exception as e:
-        logger.error(f"Chat processing error: {e}", exc_info=True)
+        logger.error(f"Chat processing error in Google ADK: {e}", exc_info=True)
         return ChatResponse(
             reply="I'm having trouble retrieving weather data right now. Please try again in a moment.",
             session_id=session_id
@@ -290,4 +282,4 @@ async def chat_endpoint(request: ChatRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "architecture": "LangGraph Granular Weather Agent"}
+    return {"status": "ok", "architecture": "Google ADK Weather Agent"}

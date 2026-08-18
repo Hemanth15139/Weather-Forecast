@@ -201,10 +201,6 @@ import { WeatherService } from '../../services/weather.service';
           </button>
 
         </form>
-
-        <div class="mt-2 text-[10px] text-slate-400 text-center flex items-center justify-center gap-1.5">
-          <span>Connected to backend: <code class="text-sky-300 font-mono">http://localhost:8000/api/chat</code></span>
-        </div>
       </div>
 
     </div>

@@ -1,0 +1,8 @@
+[build]
+  command = "npm run build"
+  publish = "dist/weather-forecast/browser"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

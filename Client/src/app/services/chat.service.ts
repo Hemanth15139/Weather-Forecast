@@ -3,13 +3,16 @@ import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import { ChatMessage, ChatRequest, ChatResponse } from '../models/chat.model';
 import { WeatherService } from './weather.service';
+import { environment } from '../../environments/environment';
 
 @Injectable({
   providedIn: 'root'
 })
 export class ChatService {
-  // Backend LLM endpoint URL (can be customized or configured)
-  private readonly apiUrl = 'http://localhost:8000/api/chat';
+  // Backend LLM endpoint URL with environment and production fallbacks
+  private readonly apiUrl = (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')
+    ? (environment.apiUrl || '/api/chat')
+    : (environment.apiUrl || 'http://localhost:8000/api/chat');
   private sessionId: string = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString();
 
   readonly messages = signal<ChatMessage[]>([
